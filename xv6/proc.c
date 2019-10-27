@@ -254,6 +254,52 @@ wait(void)
   }
 }
 
+int wait_stat(int *wtime, int *rtime, int *iotime, int* status) {
+  struct proc *p;
+  int hasKids;
+  int pid;
+
+  acquire(&ptable.lock);
+  for(;;) {
+    hasKids = 0;
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if (p->parent != proc) {
+        continue;
+      }
+      hasKids = 1;
+      if (p->state == ZOMBIE) {
+        pid = p->pid;
+        *wtime = p ->retime;
+        *rtime = p ->rutime;
+        *iotime = p->stime;
+        *status = pid;
+        kfree(p->kstack);
+        p->kstack = 0;
+        freevm(p->pgdir);
+        p->state = UNUSED;
+        p->pid = 0;
+        p->parent = 0;
+        p->name[0] = 0;
+        p->killed = 0;
+        p->ctime = 0;
+        p->ttime = 0;
+        p->stime = 0;
+        p->rutime = 0;
+        p->retime = 0;
+        release(&ptable.lock);
+        return pid;
+        }
+      }
+      if (!hasKids || proc->killed) {
+        release(&ptable.lock);
+        return -1;
+      }
+      sleep(proc, &ptable.lock);
+    }
+  }
+
+
+
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -270,13 +316,17 @@ scheduler(void)
   for(;;){
     // Enable interrupts on this processor.
     sti();
-
-    // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
 
+    // default scheduling
+    #ifdef DEFAULT
+    struct proc *p;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE) continue;
+
+      if(ticks % QUANTA != 0) {
+          break;
+      }
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
@@ -290,7 +340,66 @@ scheduler(void)
       // It should have changed its p->state before coming back.
       proc = 0;
     }
-    release(&ptable.lock);
+    #endif
+
+    // FIFO round robin
+    #ifdef FRR
+    struct proc *p;
+    int minP = lastpid;
+    int min = NPROC * 2;
+    if (ticks % QUANTA == 0) {
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        if(p->state != RUNNABLE) continue;
+
+        if (p->pid < lastpid) {
+            if (p->pid + NPROC < min) {
+                min = p->pid + NPROC;
+                minP = p->pid;
+            }
+        } else if (p->pid != lastpid && p->pid - lastpid < min) {
+            min = p->pid - lastpid;
+            minP = p->pid;
+        }
+      }
+
+      if(minP == NPROC * 2)
+        minP = lastpid;
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        if (p->pid == minP) {
+          lastpid = p->pid;
+          proc = p;
+          switchuvm(p);
+          p->state = RUNNING;
+          swtch(&cpu->scheduler, proc->context);
+          switchkvm();
+          proc = 0;
+        }
+      }
+    }
+    #endif
+
+    // first come first serve
+    #ifdef FCFS
+    struct proc *p;
+    struct proc *minProc = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE) continue;
+
+        if (minProc != 0) {
+            if (p->ctime < minProc->ctime) minProc = p;
+            else minProc = p;
+        
+      if (minProc != 0 && minProc->state == RUNNABLE) {
+          p = minProc;
+          proc = p;
+          switchuvm(p);
+          p->state = RUNNING;
+          swtch(&cpu->scheduler, proc->context);
+          switchkvm();
+          proc = 0;
+      }
+    }
+    #endif
 
   }
 }
